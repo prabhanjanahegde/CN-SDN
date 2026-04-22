@@ -3,21 +3,42 @@ import pox.openflow.libopenflow_01 as of
 
 log = core.getLogger()
 
-def install_rule(connection, dst_ip, out_port):
-    msg = of.ofp_flow_mod()
-    msg.match.dl_type = 0x800      # IPv4
-    msg.match.nw_dst = dst_ip
-    msg.actions.append(of.ofp_action_output(port=out_port))
-    connection.send(msg)
+mac_to_port = {}
 
-def _handle_ConnectionUp(event):
-    log.info("Switch connected: %s", event.connection)
+def _handle_PacketIn(event):
+    packet = event.parsed
+    connection = event.connection
 
-    # h1 = 10.0.0.1 on port 1
-    # h2 = 10.0.0.2 on port 2
+    src = packet.src
+    dst = packet.dst
+    in_port = event.port
 
-    install_rule(event.connection, "10.0.0.1", 1)
-    install_rule(event.connection, "10.0.0.2", 2)
+    # learn source port
+    mac_to_port[src] = in_port
+
+    if dst in mac_to_port:
+        out_port = mac_to_port[dst]
+
+        # install static flow
+        msg = of.ofp_flow_mod()
+        msg.match.dl_dst = dst
+        msg.actions.append(of.ofp_action_output(port=out_port))
+        connection.send(msg)
+
+        # forward current packet
+        msg = of.ofp_packet_out()
+        msg.data = event.ofp
+        msg.actions.append(of.ofp_action_output(port=out_port))
+        connection.send(msg)
+
+        log.info("Installed flow %s -> port %s", dst, out_port)
+
+    else:
+        # flood first packet
+        msg = of.ofp_packet_out()
+        msg.data = event.ofp
+        msg.actions.append(of.ofp_action_output(port=of.OFPP_FLOOD))
+        connection.send(msg)
 
 def launch():
-    core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
+    core.openflow.addListenerByName("PacketIn", _handle_PacketIn)
